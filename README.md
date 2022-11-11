@@ -6,3 +6,4 @@ Right now, this replaces the current disk device with the SD Card when loaded. T
 
 This is highly experimental at this time, and there are significant changes I will still be making to it, but I welcome any input or collaboration.
 
+P.S. Why is it called Diego? Because "SD" always reminds me of the city San Diego and I have traditionally named device drivers names ending in "o".
