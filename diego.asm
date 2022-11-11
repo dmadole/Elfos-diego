@@ -643,24 +643,36 @@ subjump:    lda   r3
             plo   r9
 
 
+          ; The following are SD Card command packets including correct CRCs
+          ; for those commands that require it. The read and write commands
+          ; need to have the correct address filled in before sending. This
+          ; approach will need rework before this can be put into ROM.
+
+cmd0:       db    40h+0,0,0,0,0,1+94h     ; reset device
+cmd8:       db    40h+8,0,0,1,0aah,1+86h  ; host capacity support
+cmd17:      db    40h+17,0,0,0,0,1        ; read single block
+cmd24:      db    40h+24,0,0,0,0,1        ; write single block
+cmd55:      db    40h+55,0,0,0,0,1        ; application command escape
+acmd41:     db    40h+41,40h,0,0,0,1      ; device capacity support
 
 
-cmd0:       db    40h+0,0,0,0,0,1+94h
-cmd8:       db    40h+8,0,0,1,0aah,1+86h
-cmd17:      db    40h+17,0,0,0,0,1
-cmd24:      db    40h+24,0,0,0,0,1
-cmd55:      db    40h+55,0,0,0,0,1
-acmd41:     db    40h+41,40h,0,0,0,1
+          ; Start data token and a couple of zeroes that are send for a dummy
+          ; CRC, even though the CRC could be anything at all.
 
 stblock:    db    0feh
 zeroes:     db    0,0
 
+
+          ; Buffer for receiving command responses. This will need to be
+          ; reworked before this can be put into ROM.
+
 buffer:     ds    5
 
 
-            ; Module name for minfo to display
+          ; Module name for minfo to display
 
             db    0,'Diego',0
+
 
 modend:   ; This is the last of what's copied to the heap.
 
