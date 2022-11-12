@@ -268,15 +268,32 @@ sdread:     glo   r3                    ; save and initialize registers
             br    initreg
 
             sep   r9                    ; send init clocks then command
-            db    sendblk.0             ;  init plus block command
-            db    cmd17.0               ;  read block command packet
-            db    1                     ;  response length
-            db    readini.0
+            db    sendblk               ;  init plus block command
+            db    cmd17                 ;  read block command packet
+
+            sep   r9                    ; read response token
+            db    recvspi               ;  one byte following idle
+
+            bz    rdblock               ; read block if response is zero,
+            bnf   error                 ;  else other than timeout is error
+
+            glo   r3                    ; if timeout, initialize sd card
+            br    initspi 
+
+            sep   r9                    ; resend block read command
+            db    sendcmd               ;  send command packet
+            db    cmd17                 ;  read block command packet
+
+            sep   r9                    ; read response token
+            db    recvspi               ;  one byte following idle
+
+            bnz   error                 ; timeout or non-zero is error
 
 rdblock:    sep   r9                    ; receive data response token
-            db    recvspi.0             ;  receive after idle
-            db    1                     ;  reponse length
-            db    timeout.0
+            db    recvspi               ;  receive after idle
+
+            xri   0feh                  ; other than 11111110 is an error,
+            bnz   error                 ;  including a timeout
 
             ghi   rf                    ; get pointer to data buffer
             phi   ra
@@ -287,27 +304,18 @@ rdblock:    sep   r9                    ; receive data response token
             phi   rc
 
             sep   r9                    ; read data into bufffer
-            db    recvraw.0
+            db    recvraw
+
+            ghi   ra                    ; update pointer to end location
+            phi   rf
 
             sep   r9                    ; read crc and disregard
-            db    recvbuf.0             ;  receive raw bytes
-            db    2                     ;  reponse length
+            db    recvbuf,2             ;  receive two raw bytes
 
-            adi   0                     ; return with df clear
-            br    return
+            br    return                ; return with df clear
 
 
 
-readini:    glo   r3                    ; initialize sd card
-            br    initspi 
-
-            sep   r9                    ; resend block read command
-            db    sendcmd.0             ;  send command packet
-            db    cmd17.0               ;  read block command packet
-            db    1                     ;  response length
-            db    timeout.0
-
-            br    rdblock               ; receive data block
 
 
 
@@ -316,16 +324,31 @@ sdwrite:    glo   r3                    ; save and initialize registers
             br    initreg
 
             sep   r9                    ; send init clocks then command
-            db    sendblk.0             ;  init plus block command
-            db    cmd24.0               ;  write block command packet
-            db    1                     ;  response length
-            db    writini.0
+            db    sendblk               ;  init plus block command
+            db    cmd24                 ;  write block command packet
+
+            sep   r9
+            db    recvspi               ;  response length
+
+            bz    wrblock               ; read block if response is zero,
+            bnf   error                 ;  else other than timeout is error
+
+            glo   r3                    ; initialize sd card
+            br    initspi 
+
+            sep   r9                    ; resend block write command
+            db    sendcmd               ;  send command packet
+            db    cmd24                 ;  write block command packet
+
+            sep   r9
+            db    recvspi               ;  response length
+
+            bnz   error                 ; timeout or non-zero is error
 
 wrblock:    sep   r9                    ; send data start token
-            db    sendbuf.0             ;  send from static memory
-            db    stblock.0             ;  start data block token
+            db    sendbuf               ;  send from static memory
+            db    stblock               ;  start data block token
             db    1                     ;  token length
-            db    0                     ;  no response expected
 
             ghi   rf                    ; get pointer to data buffer
             phi   ra
@@ -336,75 +359,99 @@ wrblock:    sep   r9                    ; send data start token
             phi   rc
 
             sep   r9                    ; read data into bufffer
-            db    sendspi.0             ;  send raw bytes from ra
-            db    0                     ;  no response expected
+            db    sendspi               ;  send raw bytes from ra
 
             ghi   ra                    ; update buffer pointer past end
             phi   rf
 
             sep   r9                    ; send dummy crc bytes
-            db    sendbuf.0             ;  send from static memory
-            db    zeroes.0              ;  dummy zero crc bytes
+            db    sendbuf               ;  send from static memory
+            db    zeroes                ;  dummy zero crc bytes
             db    2                     ;  crc bytes length
-            db    1                     ;  reponse expected
-            db    timeout.0
 
-busy:       sep   r9                    ; receive busy flag
-            db    recvbuf.0             ;  receive raw byte to memory
+            sep   r9
+            db    recvspi               ; response length
+
+            ani   1fh                   ; response other than xxx00101 is
+            xri   05h                   ;  error, including timeout
+            bnz   error
+
+isbusy:     sep   r9                    ; receive busy flag
+            db    recvbuf               ;  receive raw byte to memory
             db    1                     ;  length to receive
 
             dec   ra                    ; wait if response not zero
             ldn   ra
-            bz    busy
+            bz    isbusy
 
-            adi   0                     ; return with df clear
-            br    return
+            sep   r9                    ; send get status command
+            db    sendcmd               ;  send command packet
+            db    cmd13
 
+            sep   r9                    ; receive response
+            db    recvspi
 
+            bnz   error                 ; not 0 or timeout is error
 
-writini:    glo   r3                    ; initialize sd card
-            br    initspi 
+            sep   r9                    ; get second byte of r2 response
+            db    recvbuf
+            db    1
 
-            sep   r9                    ; resend block write command
-            db    sendcmd.0             ;  send command packet
-            db    cmd24.0               ;  write block command packet
-            db    1                     ;  response length
-            db    timeout.0
+            dec   ra                    ; if not zero then error
+            ldn   ra
+            bnz   error
 
-            br    wrblock               ; send data block
-
+            br    return                ; return with df clear
 
 
 
 initspi:    str   r2                    ; save return address
 
             sep   r9                    ; send reset command
-            db    sendcmd.0             ;  send command packet
-            db    cmd0.0                ;  reset command packet
-            db    1                     ;  response length
-            db    timeout.0
+            db    sendcmd               ;  send command packet
+            db    cmd0                  ;  reset command packet
+
+            sep   r9
+            db    recvspi               ; response length
+
+            xri   1                     ; response other than 1 is error
+            bnz   error                 ;  including a timeout
 
             sep   r9                    ; send host voltage support
-            db    sendcmd.0             ;  send command packet
-            db    cmd8.0                ;  voltage support command packet
-            db    5                     ;  response length
-            db    timeout.0
+            db    sendcmd               ;  send command packet
+            db    cmd8                  ;  voltage support command packet
+
+            sep   r9
+            db    recvspi               ; response length
+
+            xri   1                     ; response other than 1 is error
+            bnz   error                 ;  including a timeout
+
+            sep   r9                    ; receive 4 more bytes of response
+            db    recvbuf
+            db    4
 
 iniloop:    sep   r9                    ; send application command escape
-            db    sendcmd.0             ;  send command packet
-            db    cmd55.0               ;  application comman packet
-            db    1                     ;  response length
-            db    timeout.0
+            db    sendcmd               ;  send command packet
+            db    cmd55                 ;  application comman packet
+
+            sep   r9
+            db    recvspi               ;  response length
+
+            xri   1                     ; response other than 1 is error
+            bnz   error                 ;  including a timeout
 
             sep   r9                    ; send host capacity support
-            db    sendcmd.0             ;  send command packet
-            db    acmd41.0              ;  host capacity command packet
-            db    1                     ;  response length
-            db    timeout.0
+            db    sendcmd               ;  send command packet
+            db    acmd41                ;  host capacity command packet
 
-            dec   ra                    ; wait until reponse is zero
-            ldn   ra
-            bnz   iniloop
+            sep   r9
+            db    recvspi               ;  response length
+
+            shr                         ; if not 0 or 1, then error, including
+            bnz   error                 ;  if timeout
+
+            bdf   iniloop               ; if not 0, then repeat until it is
 
             ldn   r2                    ; return to instruction after br
             adi   2
@@ -416,7 +463,7 @@ iniloop:    sep   r9                    ; send application command escape
 
             org   ($ & 0ff00h) + 253
 
-timeout:    smi   0
+error:      smi   0
 
 return:     inc   r2                    ; this falls through into next page
 
@@ -548,52 +595,48 @@ sendmore:   glo   rc                    ; loop if all data has not been sent
             ghi   rc
             bnz   sendbyte
 
+            sep   r3
+
+            lda   r3
+            plo   r9
+
 
 
           ; Receive bytes through SPI into memory at RF for RC bytes. This
           ; first skips any $FF bytes which are idle time on the line before
           ; counting and receiving data. A count of 0 means 65536 bytes.
 
-recvspi:    lda   r3
-            bz    sendret
-
-            plo   rc
-
-            inc   r3
-
-            ldi   buffer.0
-            plo   ra
-
-            ldi   64                    ; idle bytes to wait for data start
+recvspi:    ldi   64                    ; idle bytes to wait for data start
             plo   re
 
 recvwait:   ldi   255                   ; start shift register with ones
 
-recvlow:    shl                         ; shift in zero, exit loop if byte
+recvhigh:   shl                        ; shift in zero, exit loop if byte
             bnf   recvlast
 
 recvmore:   req                         ; clock next bit, branch if zero
             seq
-            bn2   recvlow
+            b2    recvhigh
 
             shlc                        ; shift in one, loop if not a byte
             bdf   recvmore
 
-recvlast:   str   ra                    ; save byte, branch if not idle
-            smi   255
-            bnz   recvdata
+recvlast:   bnz   recvbyte
 
-            dec   re                    ; decrement count, loop if more
+recvskip:   dec   re                    ; decrement count, loop if more
             glo   re
             bnz   recvwait
 
-            dec   r3
-            lda   r3                    ; return to timeout vector
-            plo   r3
+            smi   0                     ; set df to signal timeout
+
+recvbyte:   xri   255                   ; complement and return
             sep   r3
 
-            lda   r3
-            plo   r9                    ; duplicate subroutine entry
+            lda   r3                    ; subroutine entry jump vector
+            plo   r9
+
+
+
 
 
 
@@ -632,7 +675,7 @@ recvdata:   inc   ra                    ; move past received byte
             ghi   rc
             bnz   recvraw
 
-sendret:    sep   r3                    ; return
+sendret:    sep   r3                    ; return with df clear
 
 
           ; Entry point for all subroutines. This is called via sep r9 with
@@ -650,6 +693,7 @@ subjump:    lda   r3
 
 cmd0:       db    40h+0,0,0,0,0,1+94h     ; reset device
 cmd8:       db    40h+8,0,0,1,0aah,1+86h  ; host capacity support
+cmd13:      db    40h+13,0,0,0,0,1        ; get card status
 cmd17:      db    40h+17,0,0,0,0,1        ; read single block
 cmd24:      db    40h+24,0,0,0,0,1        ; write single block
 cmd55:      db    40h+55,0,0,0,0,1        ; application command escape
