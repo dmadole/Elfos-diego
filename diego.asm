@@ -411,7 +411,7 @@ initspi:    str   r2                    ; save return address
             db    recvspi               ; response length
 
             xri   1                     ; response other than 1 is error
-            bnz   error                 ;  including a timeout
+            bnz   r4error               ;  including a timeout
 
             sep   r9                    ; receive 4 more bytes of response
             db    recvbuf,4
@@ -436,6 +436,23 @@ iniloop:    sep   r9                    ; send application command escape
 
             bdf   iniloop               ; if not 0, then repeat until it is
 
+            sep   r9                    ; get ocr register
+            db    sendcmd,cmd58
+
+            sep   r9                    ; first byte of response
+            db    recvspi
+
+            bnz   r4error               ; fail on error or timeout
+
+            sep   r9                    ; 4 more bytes of response
+            db    recvbuf,4
+
+            ldi   buffer.0
+            plo   ra
+            ldn   ra
+
+            ani   40h                   ; ccs bit = device capacity support
+
             ldn   r2                    ; return to instruction after br
             adi   2
             plo   r3
@@ -443,8 +460,8 @@ iniloop:    sep   r9                    ; send application command escape
 
 
 
-
-            org   ($ & 0ff00h) + 253
+r4error:    sep   r9                    ; 4 more bytes of response
+            db    recvbuf,4
 
 error:      smi   0
 
@@ -466,6 +483,7 @@ return:     inc   r2                    ; this falls through into next page
             sep   sret
 
 
+            org   ($ + 255) & 0ff00h
 
 sendblk:    ldi   80/2                  ; 80 pulses unrolled by factor of 2
 
@@ -676,7 +694,8 @@ cmd13:      db    40h+13,0,0,0,0,1        ; get card status
 cmd17:      db    40h+17,0,0,0,0,1        ; read single block
 cmd24:      db    40h+24,0,0,0,0,1        ; write single block
 cmd55:      db    40h+55,0,0,0,0,1        ; application command escape
-acmd41:     db    40h+41,40h,0,0,0,1      ; device capacity support
+cmd58:      db    40h+58,0,0,0,0,1        ; read ocr register
+acmd41:     db    40h+41,40h,0,0,0,1      ; initialize device
 
 
           ; Start data token and a couple of zeroes that are send for a dummy
