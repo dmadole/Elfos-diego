@@ -260,7 +260,7 @@ sdread:     glo   r3                    ; save and initialize registers
             br    initreg
 
             sep   r9                    ; read the block from disk
-            db    sendblk,cmd17
+            db    sendini,40h+17
 
             sep   r9                    ; read response token
             db    recvspi
@@ -272,7 +272,7 @@ sdread:     glo   r3                    ; save and initialize registers
             br    initspi 
 
             sep   r9                    ; resend block read command
-            db    sendcmd,cmd17
+            db    sendblk,40h+17
 
             sep   r9                    ; read response token
             db    recvspi
@@ -316,7 +316,7 @@ sdwrite:    glo   r3                    ; save and initialize registers
             br    initreg
 
             sep   r9                    ; send init clocks then command
-            db    sendblk,cmd24
+            db    sendini,40h+24
 
             sep   r9
             db    recvspi               ;  response length
@@ -328,7 +328,7 @@ sdwrite:    glo   r3                    ; save and initialize registers
             br    initspi 
 
             sep   r9                    ; resend block write command
-            db    sendcmd,cmd24         ;  send command packet
+            db    sendblk,40h+24        ;  send command packet
 
             sep   r9
             db    recvspi               ;  response length
@@ -336,29 +336,20 @@ sdwrite:    glo   r3                    ; save and initialize registers
             bnz   error                 ; timeout or non-zero is error
 
 wrblock:    sep   r9                    ; send data start token
-            db    sendbuf               ;  send from static memory
-            db    stblock,1             ;  start data block token
+            db    sendlit,1             ;  send from static memory
+            db    0feh
 
-            ghi   rf                    ; get pointer to data buffer
-            phi   ra
-            glo   rf
-            plo   ra
+            sex   rf
 
             sep   r9                    ; read data into bufffer
-            db    sendspi,256           ;  send raw bytes from ra
+            db    sendmrx,256           ;  send raw bytes from ra
 
             sep   r9                    ; read data into bufffer
-            db    sendspi,256           ;  send raw bytes from ra
-
-            ghi   ra                    ; update buffer pointer past end
-            phi   rf
-
-            ghi   r9                    ; reset page of data pointer
-            phi   ra
+            db    sendmrx,256           ;  send raw bytes from ra
 
             sep   r9                    ; send dummy crc bytes
-            db    sendbuf               ;  send from static memory
-            db    zeroes,2              ;  dummy zero crc bytes
+            db    sendlit,2             ;  send from static memory
+            db    0,0
 
             sep   r9
             db    recvspi               ; response length
@@ -375,7 +366,7 @@ isbusy:     sep   r9                    ; receive busy flag
             bz    isbusy
 
             sep   r9                    ; send get status command
-            db    sendcmd,cmd13         ;  send command packet
+            db    sendcmd,40h+13        ;  send command packet
 
             sep   r9                    ; receive response
             db    recvspi
@@ -396,7 +387,8 @@ isbusy:     sep   r9                    ; receive busy flag
 initspi:    str   r2                    ; save return address
 
             sep   r9                    ; send reset command
-            db    sendcmd,cmd0          ;  send command packet
+            db    sendlit,6             ;  send command packet
+            db    40h+0,0,0,0,0,1+94h   ; reset device
 
             sep   r9
             db    recvspi               ; response length
@@ -405,7 +397,8 @@ initspi:    str   r2                    ; save return address
             bnz   error                 ;  including a timeout
 
             sep   r9                    ; send host voltage support
-            db    sendcmd,cmd8          ;  send command packet
+            db    sendlit,6             ;  send command packet
+            db    40h+8,0,0,1,0aah,1+86h  ; host capacity support
 
             sep   r9
             db    recvspi               ; response length
@@ -416,8 +409,8 @@ initspi:    str   r2                    ; save return address
             sep   r9                    ; receive 4 more bytes of response
             db    recvbuf,4
 
-iniloop:    sep   r9                    ; send application command escape
-            db    sendcmd,cmd55         ;  send command packet
+waitini:    sep   r9                    ; send application command escape
+            db    sendcmd,40h+55        ;  send command packet
 
             sep   r9
             db    recvspi               ;  response length
@@ -426,7 +419,8 @@ iniloop:    sep   r9                    ; send application command escape
             bnz   error                 ;  including a timeout
 
             sep   r9                    ; send host capacity support
-            db    sendcmd,acmd41        ;  send command packet
+            db    sendlit,6             ;  send command packet
+            db    40h+41,40h,0,0,0,1    ; initialize device
 
             sep   r9
             db    recvspi               ;  response length
@@ -434,10 +428,10 @@ iniloop:    sep   r9                    ; send application command escape
             shr                         ; if not 0 or 1, then error, including
             bnz   error                 ;  if timeout
 
-            bdf   iniloop               ; if not 0, then repeat until it is
+            bdf   waitini               ; if not 0, then repeat until it is
 
             sep   r9                    ; get ocr register
-            db    sendcmd,cmd58
+            db    sendcmd,40h+58
 
             sep   r9                    ; first byte of response
             db    recvspi
@@ -485,21 +479,21 @@ return:     inc   r2                    ; this falls through into next page
 
             org   ($ + 255) & 0ff00h
 
-sendblk:    ldi   80/2                  ; 80 pulses unrolled by factor of 2
+sendini:    ldi   80/2                  ; 80 pulses unrolled by factor of 2
 
-sendini:    req                         ; send pulse, decrement pulse count
+loopini:    req                         ; send pulse, decrement pulse count
             seq
             smi   1
 
             req                         ; send pulse, loop if count not zero
             seq
-            bnz   sendini
+            bnz   loopini
 
-            lda   r3                    ; get address of the command packet,
-            adi   4                     ;  add offset to lsb of the address
-            plo   ra
+sendblk:    sex   r2
+            dec   r2
 
-            sex   ra                    ; use stxd to save a couple of instr
+            ldi   1
+            stxd
 
 
           ; Different types of SD cards address content differently, so we
@@ -525,7 +519,6 @@ sdscblk:    ldi   0                     ; lowest byte is always zero, store
             shlc
             stxd
 
-            sex   r2
             br    execcmd
 
 
@@ -542,36 +535,48 @@ sdhcblk:    glo   r7                    ; we only use the low three bytes,
             ldi   0
             stxd
 
-            sex   r2
             br    execcmd
 
 
-sendcmd:    lda   r3
-            plo   ra
+sendcmd:    sex   r2
+            dec   r2
 
-execcmd:    ldi   6
+            ldi   1
+            stxd
+            ldi   0
+            stxd
+            stxd
+            stxd
+            stxd
+
+execcmd:    lda   r3
+            str   r2
+
+            ldi   6
             plo   re
 
-            ldi   255
-            br    sendhigh
+            br    sendspi
 
+sendlit:    lda   r3
+            plo   re
 
-sendbuf:    lda   r3
-            plo   ra
+            sex   r3
+
+            br    sendspi
 
 
           ; Send data through SPI from memory starting at RF for RC bytes.
           ; Returns RF just past sent data and RC set to zero. An input count
           ; of 0 means 65536 bytes, which is probably not useful.
 
-sendspi:    lda   r3                    ; get length to send
+sendmrx:    lda   r3                    ; get length to send
             plo   re
 
-            smi   0                     ; set df to mark end of bits
+sendspi:    smi   0                     ; set df to mark end of bits
 
 sendbyte:   dec   re                    ; decrement byte count
 
-            lda   ra                    ; get next byte to send and shift
+            ldxa                        ; get next byte to send and shift
             shlc                        ;  in a one bit to mark end
             bnf   sendlow
 
@@ -683,26 +688,9 @@ subjump:    lda   r3
             plo   r9
 
 
-          ; The following are SD Card command packets including correct CRCs
-          ; for those commands that require it. The read and write commands
-          ; need to have the correct address filled in before sending. This
-          ; approach will need rework before this can be put into ROM.
-
-cmd0:       db    40h+0,0,0,0,0,1+94h     ; reset device
-cmd8:       db    40h+8,0,0,1,0aah,1+86h  ; host capacity support
-cmd13:      db    40h+13,0,0,0,0,1        ; get card status
-cmd17:      db    40h+17,0,0,0,0,1        ; read single block
-cmd24:      db    40h+24,0,0,0,0,1        ; write single block
-cmd55:      db    40h+55,0,0,0,0,1        ; application command escape
-cmd58:      db    40h+58,0,0,0,0,1        ; read ocr register
-acmd41:     db    40h+41,40h,0,0,0,1      ; initialize device
-
-
           ; Start data token and a couple of zeroes that are send for a dummy
           ; CRC, even though the CRC could be anything at all.
 
-stblock:    db    0feh
-zeroes:     db    0,0
 
 
           ; Buffer for receiving command responses. This will need to be
