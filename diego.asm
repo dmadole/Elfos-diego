@@ -260,7 +260,7 @@ sdread:     glo   r3                    ; save and initialize registers
             br    initreg
 
             sep   r9                    ; read the block from disk
-            db    sendini,40h+17
+            db    sendini,51h
 
             sep   r9                    ; read response token
             db    recvspi
@@ -272,7 +272,7 @@ sdread:     glo   r3                    ; save and initialize registers
             br    initspi 
 
             sep   r9                    ; resend block read command
-            db    sendblk,40h+17
+            db    sendblk,51h
 
             sep   r9                    ; read response token
             db    recvspi
@@ -291,10 +291,10 @@ rdblock:    sep   r9                    ; receive data response token
             plo   ra
 
             sep   r9                    ; get first 256 data bytes to buffer
-            db    recvraw,256
+            db    recvraw,100h
 
             sep   r9                    ; get last 256 data bytes to buffer
-            db    recvraw,256
+            db    recvraw,100h
 
             ghi   ra                    ; update returned buffer pointer
             phi   rf
@@ -303,7 +303,10 @@ rdblock:    sep   r9                    ; receive data response token
             phi   ra
 
             sep   r9                    ; read crc and disregard
-            db    recvbuf,2
+            db    recvstk,2
+
+            inc   r2
+            inc   r2
 
             br    return                ; return with df clear
 
@@ -316,7 +319,7 @@ sdwrite:    glo   r3                    ; save and initialize registers
             br    initreg
 
             sep   r9                    ; send init clocks then command
-            db    sendini,40h+24
+            db    sendini,58h
 
             sep   r9
             db    recvspi               ;  response length
@@ -328,7 +331,7 @@ sdwrite:    glo   r3                    ; save and initialize registers
             br    initspi 
 
             sep   r9                    ; resend block write command
-            db    sendblk,40h+24        ;  send command packet
+            db    sendblk,58h           ;  send command packet
 
             sep   r9
             db    recvspi               ;  response length
@@ -342,10 +345,10 @@ wrblock:    sep   r9                    ; send data start token
             sex   rf
 
             sep   r9                    ; read data into bufffer
-            db    sendmrx,256           ;  send raw bytes from ra
+            db    sendmrx,100h          ;  send raw bytes from ra
 
             sep   r9                    ; read data into bufffer
-            db    sendmrx,256           ;  send raw bytes from ra
+            db    sendmrx,100h          ;  send raw bytes from ra
 
             sep   r9                    ; send dummy crc bytes
             db    sendlit,2             ;  send from static memory
@@ -359,14 +362,13 @@ wrblock:    sep   r9                    ; send data start token
             bnz   error
 
 isbusy:     sep   r9                    ; receive busy flag
-            db    recvbuf,1             ;  receive raw byte to memory
+            db    recvstk,1             ;  receive raw byte to memory
 
-            dec   ra                    ; wait if response not zero
-            ldn   ra
+            lda   r2
             bz    isbusy
 
             sep   r9                    ; send get status command
-            db    sendcmd,40h+13        ;  send command packet
+            db    sendcmd,4dh           ;  send command packet
 
             sep   r9                    ; receive response
             db    recvspi
@@ -374,10 +376,9 @@ isbusy:     sep   r9                    ; receive busy flag
             bnz   error                 ; not 0 or timeout is error
 
             sep   r9                    ; get second byte of r2 response
-            db    recvbuf,1
+            db    recvstk,1
 
-            dec   ra                    ; if not zero then error
-            ldn   ra
+            lda   r2
             bnz   error
 
             br    return                ; return with df clear
@@ -388,7 +389,7 @@ initspi:    str   r2                    ; save return address
 
             sep   r9                    ; send reset command
             db    sendlit,6             ;  send command packet
-            db    40h+0,0,0,0,0,1+94h   ; reset device
+            db    40h,0,0,0,0,95h       ; reset device
 
             sep   r9
             db    recvspi               ; response length
@@ -398,7 +399,7 @@ initspi:    str   r2                    ; save return address
 
             sep   r9                    ; send host voltage support
             db    sendlit,6             ;  send command packet
-            db    40h+8,0,0,1,0aah,1+86h  ; host capacity support
+            db    48h,0,0,1,5,8fh       ; host capacity support
 
             sep   r9
             db    recvspi               ; response length
@@ -407,10 +408,15 @@ initspi:    str   r2                    ; save return address
             bnz   r4error               ;  including a timeout
 
             sep   r9                    ; receive 4 more bytes of response
-            db    recvbuf,4
+            db    recvstk,4
+
+            inc   r2
+            inc   r2
+            inc   r2
+            inc   r2
 
 waitini:    sep   r9                    ; send application command escape
-            db    sendcmd,40h+55        ;  send command packet
+            db    sendcmd,77h           ;  send command packet
 
             sep   r9
             db    recvspi               ;  response length
@@ -420,7 +426,7 @@ waitini:    sep   r9                    ; send application command escape
 
             sep   r9                    ; send host capacity support
             db    sendlit,6             ;  send command packet
-            db    40h+41,40h,0,0,0,1    ; initialize device
+            db    69h,40h,0,0,0,1       ; initialize device
 
             sep   r9
             db    recvspi               ;  response length
@@ -431,7 +437,7 @@ waitini:    sep   r9                    ; send application command escape
             bdf   waitini               ; if not 0, then repeat until it is
 
             sep   r9                    ; get ocr register
-            db    sendcmd,40h+58
+            db    sendcmd,7ah
 
             sep   r9                    ; first byte of response
             db    recvspi
@@ -439,12 +445,13 @@ waitini:    sep   r9                    ; send application command escape
             bnz   r4error               ; fail on error or timeout
 
             sep   r9                    ; 4 more bytes of response
-            db    recvbuf,4
+            db    recvstk,4
 
-            ldi   buffer.0
-            plo   ra
-            ldn   ra
+            inc   r2
+            inc   r2
+            inc   r2
 
+            lda   r2
             ani   40h                   ; ccs bit = device capacity support
 
             ldn   r2                    ; return to instruction after br
@@ -455,7 +462,12 @@ waitini:    sep   r9                    ; send application command escape
 
 
 r4error:    sep   r9                    ; 4 more bytes of response
-            db    recvbuf,4
+            db    recvstk,4
+
+            inc   r2
+            inc   r2
+            inc   r2
+            inc   r2
 
 error:      smi   0
 
@@ -643,6 +655,22 @@ recvbyte:   xri   255                   ; complement and return
 
 
 
+
+
+recvstk:    ldn   r3
+
+pushstk:    dec   r2
+            smi   1
+            bnz   pushstk
+
+            glo   r2
+            plo   ra
+            ghi   r2
+            phi   ra
+
+            br    recvraw
+
+
           ; Receive up to 255 bytes into the scratchpad buffer by presetting
           ; RC based on an inline value and RA to the buffer address.
 
@@ -672,7 +700,7 @@ recvnext:   req                         ; clock next bit, branch if zero
 
 recvdone:   str   ra                    ; save byte to buffer
 
-recvdata:   inc   ra                    ; move past received byte
+            inc   ra                    ; move past received byte
 
             glo   re
             bnz   recvloop
