@@ -23,6 +23,7 @@
 
           ; Define non-published API elements
 
+d_idereset: equ   0444h
 d_ideread:  equ   0447h
 d_idewrite: equ   044ah
 
@@ -202,14 +203,17 @@ hookloop:   lda   rd                    ; a zero marks end of the table
 
           ; All done, exit to operating system
 
-finished:   seq                         ; idle state for q is high
+finished:   sep   scall
+            dw    d_idereset
+
             sep   sret
 
 
           ; Table giving addresses of jump vectors we need to update, along
           ; with offset from the start of the module to repoint those to.
 
-patchtbl:   dw    d_ideread, sdread
+patchtbl:   dw    d_idereset, sdreset
+            dw    d_ideread, sdread
             dw    d_idewrite, sdwrite
             db    0
 
@@ -224,14 +228,10 @@ module:   ; Start the actual module code on a new page so that it forms
 
 
 
-initreg:    plo   re
+initreg:    adi   2                     ; save return address following br
+            plo   re
 
             ghi   re                    ; save to use as transfer counter
-            stxd
-
-            glo   ra                    ; save to use as transfer pointer
-            stxd
-            ghi   ra
             stxd
 
             glo   r9                    ; save to use for subroutine call
@@ -239,17 +239,30 @@ initreg:    plo   re
             ghi   r9
             stxd
 
-            ldi   subjump               ; initialize r9 for subroutine call
-            plo   r9
-            ghi   r3
+            ghi   r3                    ; initialize r9 for subroutine call
             adi   1
             phi   r9
-
-            phi   ra                    ; preset page of data pointer
+            ldi   subjump
+            plo   r9
 
             glo   re                    ; return to caller
-            adi   2
             plo   r3
+
+
+
+
+sdreset:    seq
+
+            glo   r3
+            br    initreg
+
+            sep   r9
+            db    sendini
+
+            glo   r3
+            br    initspi
+
+            br    return
 
 
           ; Read a block from the SD Card; the block address is passed in
@@ -259,8 +272,11 @@ initreg:    plo   re
 sdread:     glo   r3                    ; save and initialize registers
             br    initreg
 
+            sep   r9
+            db    sendini
+
             sep   r9                    ; read the block from disk
-            db    sendini,51h
+            db    sendblk,51h
 
             sep   r9                    ; read response token
             db    recvspi
@@ -285,22 +301,11 @@ rdblock:    sep   r9                    ; receive data response token
             xri   0feh                  ; other than 11111110 is an error,
             bnz   error                 ;  including a timeout
 
-            ghi   rf                    ; get pointer to data buffer
-            phi   ra
-            glo   rf
-            plo   ra
-
             sep   r9                    ; get first 256 data bytes to buffer
-            db    recvraw,100h
+            db    recvbuf,100h
 
             sep   r9                    ; get last 256 data bytes to buffer
-            db    recvraw,100h
-
-            ghi   ra                    ; update returned buffer pointer
-            phi   rf
-
-            ghi   r9                    ; reset page of data pointer
-            phi   ra
+            db    recvbuf,100h
 
             sep   r9                    ; read crc and disregard
             db    recvstk,2
@@ -319,7 +324,10 @@ sdwrite:    glo   r3                    ; save and initialize registers
             br    initreg
 
             sep   r9                    ; send init clocks then command
-            db    sendini,58h
+            db    sendini
+
+            sep   r9                    ; send init clocks then command
+            db    sendblk,58h
 
             sep   r9
             db    recvspi               ;  response length
@@ -385,7 +393,8 @@ isbusy:     sep   r9                    ; receive busy flag
 
 
 
-initspi:    str   r2                    ; save return address
+initspi:    adi   2                     ; save return address following br
+            str   r2
 
             sep   r9                    ; send reset command
             db    sendlit,6             ;  send command packet
@@ -451,11 +460,15 @@ waitini:    sep   r9                    ; send application command escape
             inc   r2
             inc   r2
 
-            lda   r2
-            ani   40h                   ; ccs bit = device capacity support
+            ghi   r9                    ; pointer to byte to store ccs flag
+            phi   re
+            ldi   ocrreg
+            plo   re
 
-            ldn   r2                    ; return to instruction after br
-            adi   2
+            lda   r2                    ; save ccs flag
+            str   re
+
+            ldn   r2                    ; return
             plo   r3
 
 
@@ -478,11 +491,6 @@ return:     inc   r2                    ; this falls through into next page
             lda   r2
             plo   r9
 
-            lda   r2
-            phi   ra
-            lda   r2
-            plo   ra
-
             ldn   r2
             phi   re
 
@@ -501,6 +509,13 @@ loopini:    req                         ; send pulse, decrement pulse count
             seq
             bnz   loopini
 
+            sep   r3
+
+            lda   r3
+            plo   r9
+
+
+
 sendblk:    sex   r2
             dec   r2
 
@@ -512,14 +527,21 @@ sendblk:    sex   r2
           ; need to handle two cases here depending on what kind of card we
           ; detected during the initialization process.
 
-            br    sdhcblk               ; right now the type is static
+            ghi   r9                    ; get saved ccs flag from card init
+            phi   re
+            ldi   ocrreg
+            plo   re
+
+            ldn   re                    ; if set, card is high-capacity
+            ani   40h
+            bnz   sdhcblk
 
 
           ; SDSC cards address content by byte and so the Elf/OS block address
           ; needs to be multiplied by 512, which is nine left bit shifts, or
           ; one byte shift plus one extra bit.
 
-sdscblk:    ldi   0                     ; lowest byte is always zero, store
+            ldi   0                     ; lowest byte is always zero, store
             stxd                        ;  shifted left address in next three
             glo   r7
             shl
@@ -607,9 +629,16 @@ sendlow:    req                         ; send a zero bit, shift data and
 sendmore:   glo   re                    ; loop if all data has not been sent
             bnz   sendbyte
 
-            sep   r3
+            sep   r3                    ; return
 
-            lda   r3
+
+          ; Entry point subroutine calls. This is called via SEP R9 with the
+          ; individual subroutine address within the page passed in D, which
+          ; it simply jumps to by storing to the lsb of the program counter.
+          ; This is duplicated after each subroutine return so that the R9
+          ; register does not need to be reset for each call.
+
+subjump:    lda   r3
             plo   r9
 
 
@@ -655,34 +684,43 @@ recvbyte:   xri   255                   ; complement and return
 
 
 
+          ; Receive bytes through SPI into memory at RF for RC bytes. This
+          ; immediately puts bytes into memory without skipping any leading
+          ; $FF bytes like recvspi does. A count of 0 means 65536 bytes.
 
+recvstk:    lda   r3                    ; get inline length to receive
+            plo   re
 
-recvstk:    ldn   r3
+rstkloop:   dec   re                    ; decrement received bytes count,
+            ldi   255                   ;  set shift register to count bits
 
-pushstk:    dec   r2
-            smi   1
-            bnz   pushstk
+rstkzero:   shl                         ; shift in zero, exit loop if a byte
+            bnf   rstkdone
 
-            glo   r2
-            plo   ra
-            ghi   r2
-            phi   ra
+rstknext:   req                         ; clock next bit, branch if zero
+            seq
+            bn2   rstkzero
 
-            br    recvraw
+            shlc                        ; shift in one, loop if not a byte
+            bdf   rstknext
 
+rstkdone:   dec   r2                    ; save byte to buffer
+            str   r2
 
-          ; Receive up to 255 bytes into the scratchpad buffer by presetting
-          ; RC based on an inline value and RA to the buffer address.
+            glo   re
+            bnz   rstkloop
 
-recvbuf:    ldi   buffer.0
-            plo   ra
+            sep   r3                    ; return with df clear
+
+            lda   r3
+            plo   r9
 
 
           ; Receive bytes through SPI into memory at RF for RC bytes. This
           ; immediately puts bytes into memory without skipping any leading
           ; $FF bytes like recvspi does. A count of 0 means 65536 bytes.
 
-recvraw:    lda   r3                    ; get inline length to receive
+recvbuf:    lda   r3                    ; get inline length to receive
             plo   re
 
 recvloop:   dec   re                    ; decrement received bytes count,
@@ -698,33 +736,21 @@ recvnext:   req                         ; clock next bit, branch if zero
             shlc                        ; shift in one, loop if not a byte
             bdf   recvnext
 
-recvdone:   str   ra                    ; save byte to buffer
-
-            inc   ra                    ; move past received byte
+recvdone:   str   rf                    ; save byte to buffer
+            inc   rf                    ; move past received byte
 
             glo   re
             bnz   recvloop
 
             sep   r3                    ; return with df clear
 
-
-          ; Entry point for all subroutines. This is called via sep r9 with
-          ; the address within the page passed in D, which it simply jumps
-          ; to by putting the address into the lsb of the program counter.
-
-subjump:    lda   r3
+            lda   r3
             plo   r9
 
 
-          ; Start data token and a couple of zeroes that are send for a dummy
-          ; CRC, even though the CRC could be anything at all.
+          ; Stores card capacity flag
 
-
-
-          ; Buffer for receiving command responses. This will need to be
-          ; reworked before this can be put into ROM.
-
-buffer:     ds    5
+ocrreg:     db    0
 
 
           ; Module name for minfo to display
