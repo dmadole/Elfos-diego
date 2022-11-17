@@ -223,10 +223,31 @@ patchtbl:   dw    d_idereset, sdreset
 module:   ; Start the actual module code on a new page so that it forms
           ; a block of page-relocatable code that will be copied to himem.
 
+          ; There are three kinds of subroutine calls in use here. The main
+          ; entry points of SDRESET, SDREAD, and SDWRITE are all called with
+          ; standard SCRT conventions like all of Elf/OS uses. Because the
+          ; driver code needs to be relocatable, we use two other methods,
+          ; and also because they are much less overhead than SCRT.
+
+          ; For calling subroutines in the same page, we use a calling 
+          ; convention of GLO R3,BR SUBR; the GLO R3 is to pass the return
+          ; address to the subroutine, which it increments by 2 to get the
+          ; return address past the BR instruction, and saves it somewhere.
+          ; To return, the address is simply stuffed into the PC with PLO R3.
+
+          ; For calling subroutines in the other page, we use SEP R9 to 
+          ; switch PC to one in the other page. In this case, we follow the
+          ; SEP R9 with the address of the subroutine within the other page.
+          ; R9 is initialized to point to a LDA R3,PLO R9 sequence which
+          ; gets the inline address argument and jumps to it. To save having
+          ; to reset R9, each subroutine return (consisting of SEP R3) is
+          ; followed by this same sequence to R9 is always pointing to one
+          ; or another instance of it.
 
 
-
-
+          ; INITREG saves the registers we use and presets R9 for subroutine
+          ; calls in the other page. RE is used for temporary storage of the
+          ; return address since we are pushing to the stack here.
 
 initreg:    adi   2                     ; save return address following br
             plo   re
@@ -249,30 +270,36 @@ initreg:    adi   2                     ; save return address following br
             plo   r3
 
 
+          ; SDRESET first sets Q high so it's in the correct idle state, then
+          ; it initializes the SD Card, if one is present. This should be 
+          ; called before the first read or write operations as the
+          ; initialization process is also where the card capacity is read
+          ; which is needed to know how to send the block addresses.
 
+sdreset:    seq                         ; set clock line to idle state
 
-sdreset:    seq
-
-            glo   r3
+            glo   r3                    ; save and intialize registers
             br    initreg
 
-            sep   r9
+            sep   r9                    ; send initial clock pulses
             db    sendini
 
-            glo   r3
+            glo   r3                    ; send initialization commands
             br    initspi
 
-            br    return
+            br    return                ; done, return
 
 
-          ; Read a block from the SD Card; the block address is passed in
-          ; R8:R7 and the pointer to the data buffer is in RF. If the read
-          ; is successful, DF is cleared, otherwise it is set.
+          ; SDREAD reads a block from the SD Card; the block address is passed
+          ; in R8:R7 and the pointer to the data buffer is in RF. If the read
+          ; is successful, DF is cleared, otherwise it is set. If the initial
+          ; read command times out, it means that the card is not in SPI
+          ; mode, and was probably just inserted, so the card is initialized.
 
 sdread:     glo   r3                    ; save and initialize registers
             br    initreg
 
-            sep   r9
+            sep   r9                    ; send initial clock pulses
             db    sendini
 
             sep   r9                    ; read the block from disk
@@ -295,7 +322,7 @@ sdread:     glo   r3                    ; save and initialize registers
 
             bnz   error                 ; timeout or non-zero is error
 
-rdblock:    sep   r9                    ; receive data response token
+rdblock:    sep   r9                    ; receive data block start token
             db    recvspi
 
             xri   0feh                  ; other than 11111110 is an error,
@@ -307,148 +334,147 @@ rdblock:    sep   r9                    ; receive data response token
             sep   r9                    ; get last 256 data bytes to buffer
             db    recvbuf,100h
 
-            sep   r9                    ; read crc and disregard
+            sep   r9                    ; read crc of data
             db    recvstk,2
 
-            inc   r2
+            inc   r2                    ; discard the crc
             inc   r2
 
             br    return                ; return with df clear
 
 
-          ; Write a block to the SD Card; the block address is passed in
-          ; R8:R7 and the pointer to the data buffer is in RF. If the write
-          ; is successful, DF is cleared, otherwise it is set.
-
+          ; SDWRITE writes a block to the SD Card; the block address is passed 
+          ; in R8:R7 and the pointer to the data buffer is in RF. If the write
+          ; is successful, DF is cleared, otherwise it is set. Unlike in
+          ; SDREAD, we do not intialize the card if the write command times
+          ; out. This is because a write as the first operation to a newly
+          ; inserted card is almost certainly wrong and will corrput data,
+          ; probably it happened as a result of a card that was swapped while
+          ; a file was open. So, it seems safer to let these fail.
+ 
 sdwrite:    glo   r3                    ; save and initialize registers
             br    initreg
 
-            sep   r9                    ; send init clocks then command
+            sep   r9                    ; send initialization clocks
             db    sendini
 
-            sep   r9                    ; send init clocks then command
+            sep   r9                    ; send block write command
             db    sendblk,58h
-
-            sep   r9
-            db    recvspi               ;  response length
-
-            bz    wrblock               ; read block if response is zero,
-            bnf   error                 ;  else other than timeout is error
-
-            glo   r3                    ; initialize sd card
-            br    initspi 
-
-            sep   r9                    ; resend block write command
-            db    sendblk,58h           ;  send command packet
-
-            sep   r9
-            db    recvspi               ;  response length
-
-            bnz   error                 ; timeout or non-zero is error
-
-wrblock:    sep   r9                    ; send data start token
-            db    sendlit,1             ;  send from static memory
-            db    0feh
-
-            sex   rf
-
-            sep   r9                    ; read data into bufffer
-            db    sendmrx,100h          ;  send raw bytes from ra
-
-            sep   r9                    ; read data into bufffer
-            db    sendmrx,100h          ;  send raw bytes from ra
-
-            sep   r9                    ; send dummy crc bytes
-            db    sendlit,2             ;  send from static memory
-            db    0,0
-
-            sep   r9
-            db    recvspi               ; response length
-
-            ani   1fh                   ; response other than xxx00101 is
-            xri   05h                   ;  error, including timeout
-            bnz   error
-
-isbusy:     sep   r9                    ; receive busy flag
-            db    recvstk,1             ;  receive raw byte to memory
-
-            lda   r2
-            bz    isbusy
-
-            sep   r9                    ; send get status command
-            db    sendcmd,4dh           ;  send command packet
-
-            sep   r9                    ; receive response
+  
+            sep   r9                    ; get response token
             db    recvspi
 
-            bnz   error                 ; not 0 or timeout is error
+            bnz   error                 ; not zero or timeout is an error
+
+            sep   r9                    ; send data block start token
+            db    sendlit,1             ;  of 11111110
+            db    0feh
+
+            sex   rf                    ; rf points to the buffer
+
+            sep   r9                    ; send first 256 bytes from buffer
+            db    sendmrx,100h
+
+            sep   r9                    ; send next 256 bytes from buffer
+            db    sendmrx,100h
+
+            sep   r9                    ; send dummy crc bytes, in spi
+            db    sendlit,2             ;  mode crcs are not used by default
+            db    0,0
+
+            sep   r9                    ; get data response token
+            db    recvspi
+
+            ani   1fh                   ; response other than xxx00101 is
+            xri   05h                   ;  error, including a timeout
+            bnz   error
+
+isbusy:     sep   r9                    ; receive busy token
+            db    recvstk,1
+
+            lda   r2                    ; wait until token is not zero
+            bz    isbusy
+
+            sep   r9                    ; send get device status command
+            db    sendcmd,4dh
+
+            sep   r9                    ; receive response token
+            db    recvspi
+
+            bnz   r1error               ; not 0 or timeout is error
 
             sep   r9                    ; get second byte of r2 response
             db    recvstk,1
 
-            lda   r2
+            lda   r2                    ; not zero is an error
             bnz   error
 
             br    return                ; return with df clear
 
 
+          ; INITSPI initializes an SD Card into SPI mode by sending the
+          ; prescribed sequence of commands. One important part of this is
+          ; discovery of whether the card is high capacity (HC or XC types)
+          ; because this determines whether the data on the card is addressed
+          ; by byte or by block. So this information is saved during initial-
+          ; ization for later reference in sending read and write commands.
 
 initspi:    adi   2                     ; save return address following br
             str   r2
 
             sep   r9                    ; send reset command
-            db    sendlit,6             ;  send command packet
-            db    40h,0,0,0,0,95h       ; reset device
+            db    sendlit,6
+            db    40h,0,0,0,0,95h
 
-            sep   r9
-            db    recvspi               ; response length
+            sep   r9                    ; get response token
+            db    recvspi
 
-            xri   1                     ; response other than 1 is error
-            bnz   error                 ;  including a timeout
+            xri   1                     ; timeout or other than 1 is error
+            bnz   error
 
             sep   r9                    ; send host voltage support
-            db    sendlit,6             ;  send command packet
-            db    48h,0,0,1,5,8fh       ; host capacity support
+            db    sendlit,6
+            db    48h,0,0,1,5,8fh
 
-            sep   r9
-            db    recvspi               ; response length
+            sep   r9                    ; get response token
+            db    recvspi
 
-            xri   1                     ; response other than 1 is error
-            bnz   r4error               ;  including a timeout
+            xri   1                     ; timeout or other than 1 is error
+            bnz   r4error
 
             sep   r9                    ; receive 4 more bytes of response
             db    recvstk,4
 
-            inc   r2
+            inc   r2                    ; discard response
             inc   r2
             inc   r2
             inc   r2
 
 waitini:    sep   r9                    ; send application command escape
-            db    sendcmd,77h           ;  send command packet
+            db    sendcmd,77h
 
             sep   r9
-            db    recvspi               ;  response length
+            db    recvspi               ; get response token
 
-            xri   1                     ; response other than 1 is error
-            bnz   error                 ;  including a timeout
+            xri   1                     ; timeout or other than 1 is error
+            bnz   error
 
             sep   r9                    ; send host capacity support
-            db    sendlit,6             ;  send command packet
-            db    69h,40h,0,0,0,1       ; initialize device
+            db    sendlit,6
+            db    69h,40h,0,0,0,1
 
-            sep   r9
-            db    recvspi               ;  response length
+            sep   r9                    ; get reponse token
+            db    recvspi
 
-            shr                         ; if not 0 or 1, then error, including
-            bnz   error                 ;  if timeout
+            shr                         ; if not 0 or 1, then error
+            bnz   error
 
-            bdf   waitini               ; if not 0, then repeat until it is
+            bdf   waitini               ; if not 0, then repeat until so
 
             sep   r9                    ; get ocr register
             db    sendcmd,7ah
 
-            sep   r9                    ; first byte of response
+            sep   r9                    ; get first byte of response
             db    recvspi
 
             bnz   r4error               ; fail on error or timeout
@@ -456,31 +482,39 @@ waitini:    sep   r9                    ; send application command escape
             sep   r9                    ; 4 more bytes of response
             db    recvstk,4
 
-            inc   r2
+            inc   r2                    ; discard last three bytes
             inc   r2
             inc   r2
 
-            ghi   r9                    ; pointer to byte to store ccs flag
+            ghi   r9                    ; pointer to byte to store ocr
             phi   re
             ldi   ocrreg
             plo   re
 
-            lda   r2                    ; save ccs flag
+            lda   r2                    ; save first byte of response
             str   re
 
             ldn   r2                    ; return
             plo   r3
 
 
+          ; R4ERROR and R1ERROR return from an error condition, first
+          ; reading any outstanding bytes that the card needs to send.
+
+r4error:    sep   r9                    ; receive and discard 4 bytes
+            db    recvstk,3
+
+            inc   r2
+            inc   r2
+            inc   r2
+
+r1error:    sep   r9                    ; receive and discard 1 byte
+            db    recvstk,1
+
+            inc   r2
 
 
-r4error:    sep   r9                    ; 4 more bytes of response
-            db    recvstk,4
-
-            inc   r2
-            inc   r2
-            inc   r2
-            inc   r2
+          ; Make sure DF is set on return from error condition.
 
 error:      smi   0
 
@@ -499,6 +533,12 @@ return:     inc   r2                    ; this falls through into next page
 
             org   ($ + 255) & 0ff00h
 
+
+          ; After power-on an SD Card may require up to 74 clock pulses
+          ; to be able to initialize, so we send extra pulses before each
+          ; initial block command in case the card was freshly inserted.
+          ; 80 pulses are sent so it does not disrupt byte syncronization.
+
 sendini:    ldi   80/2                  ; 80 pulses unrolled by factor of 2
 
 loopini:    req                         ; send pulse, decrement pulse count
@@ -509,14 +549,20 @@ loopini:    req                         ; send pulse, decrement pulse count
             seq
             bnz   loopini
 
-            sep   r3
+            sep   r3                    ; return
 
-            lda   r3
+            lda   r3                    ; subroutine call re-entry point
             plo   r9
 
 
+          ; Send a block read or write command by building the command packet
+          ; on the stack including the appropriate address from R8:R7 and
+          ; then sending it. The OCR register byte that is retreived during
+          ; card initialization is referenced to see if the card is high
+          ; capacity or not so we know what address format to use. The first
+          ; byte specifying the read or write command is passed inline.
 
-sendblk:    sex   r2
+sendblk:    sex   r2  
             dec   r2
 
             ldi   1
@@ -572,10 +618,14 @@ sdhcblk:    glo   r7                    ; we only use the low three bytes,
             br    execcmd
 
 
-sendcmd:    sex   r2
+          ; Build a command packet with an all-zeroes payload on the stack
+          ; and send to the card. The first byte is passed inline and the 
+          ; CRC is sent as zero since most commands don't need it in SPI mode.
+
+sendcmd:    sex   r2                    ; build downward on stack
             dec   r2
 
-            ldi   1
+            ldi   1                     ; store crc and stuff bits
             stxd
             ldi   0
             stxd
@@ -583,13 +633,19 @@ sendcmd:    sex   r2
             stxd
             stxd
 
-execcmd:    lda   r3
+execcmd:    lda   r3                    ; store first command byte
             str   r2
 
-            ldi   6
+            ldi   6                     ; length of the packet to send
             plo   re
 
-            br    sendspi
+            br    sendspi               ; send via spi output routine
+
+
+          ; Send literal bytes inline with the subroutine call. This is used
+          ; to send command packets with payloads that the prior cases cannot
+          ; handle, and for commands where the CRC needs to be correct, as
+          ; well as for data tokens and CRCs.
 
 sendlit:    lda   r3
             plo   re
@@ -599,9 +655,9 @@ sendlit:    lda   r3
             br    sendspi
 
 
-          ; Send data through SPI from memory starting at RF for RC bytes.
-          ; Returns RF just past sent data and RC set to zero. An input count
-          ; of 0 means 65536 bytes, which is probably not useful.
+          ; Send data through SPI from memory starting at RX for RE.0 bytes.
+          ; Leaves RX just past sent data and RE.0 set to zero. An input count
+          ; of 0 means 256 bytes; to send more than that, call more than once.
 
 sendmrx:    lda   r3                    ; get length to send
             plo   re
@@ -632,7 +688,7 @@ sendmore:   glo   re                    ; loop if all data has not been sent
             sep   r3                    ; return
 
 
-          ; Entry point subroutine calls. This is called via SEP R9 with the
+          ; Entry point of subroutine calls. This is called via SEP R9 with
           ; individual subroutine address within the page passed in D, which
           ; it simply jumps to by storing to the lsb of the program counter.
           ; This is duplicated after each subroutine return so that the R9
@@ -640,7 +696,6 @@ sendmore:   glo   re                    ; loop if all data has not been sent
 
 subjump:    lda   r3
             plo   r9
-
 
 
           ; Receive a single byte through SPI, first skiping any $FF bytes
@@ -682,11 +737,9 @@ recvbyte:   xri   255                   ; complement and return
             plo   r9
 
 
-
-
-          ; Receive bytes through SPI into memory at RF for RC bytes. This
-          ; immediately puts bytes into memory without skipping any leading
-          ; $FF bytes like recvspi does. A count of 0 means 65536 bytes.
+          ; Receive bytes through SPI, pushing them onto the stack, for
+          ; RE.0 bytes. This receives immediately without skipping any $FF
+          ; idle bytes.
 
 recvstk:    lda   r3                    ; get inline length to receive
             plo   re
@@ -716,9 +769,9 @@ rstkdone:   dec   r2                    ; save byte to buffer
             plo   r9
 
 
-          ; Receive bytes through SPI into memory at RF for RC bytes. This
+          ; Receive bytes through SPI into memory at RF for RE.0 bytes. This
           ; immediately puts bytes into memory without skipping any leading
-          ; $FF bytes like recvspi does. A count of 0 means 65536 bytes.
+          ; $FF bytes like recvspi does. A count of 0 means 256 bytes.
 
 recvbuf:    lda   r3                    ; get inline length to receive
             plo   re
@@ -748,7 +801,7 @@ recvdone:   str   rf                    ; save byte to buffer
             plo   r9
 
 
-          ; Stores card capacity flag
+          ; Stores card capacity flag.
 
 ocrreg:     db    0
 
